@@ -1,0 +1,216 @@
+<?xml version="1.0"?>
+<!DOCTYPE modification SYSTEM "http://www.simplemachines.org/xml/modification">
+<modification xmlns="http://www.simplemachines.org/xml/modification" xmlns:smf="http://www.simplemachines.org/">
+<name>LDAP Login</name>
+<id>jrtaylor:LDAP_Login</id>
+<version>1.0</version>
+
+
+<file name="$sourcedir/LogInOut.php">
+<operation>
+	<search position="after"><![CDATA[	// No funky symbols either.
+	if (preg_match('~[<>&"\'=\\\]~', preg_replace('~(&#(\\d{1,7}|x[0-9a-fA-F]{1,6});)~', '', $_POST['user'])) != 0)
+	{
+		$context['login_errors'] = array($txt['error_invalid_characters_username']);
+		return;
+	}]]></search>
+	<add><![CDATA[	$ldap_user = _authLDAP($_REQUEST['user'], $_POST['passwrd']);]]></add>
+	</operation>
+		<operation>
+			<search position="after"><![CDATA[// This protects against brute force attacks on a member's password. Importantly even if the password was right we DON'T TELL THEM!
+function validatePasswordFlood($id_member, $password_flood_value = false, $was_correct = false)
+{
+	global $smcFunc, $cookiename, $sourcedir;
+
+	// As this is only brute protection, we allow 5 attempts every 10 seconds.
+
+	// Destroy any session or cookie data about this member, as they validated wrong.
+	require_once($sourcedir . '/Subs-Auth.php');
+	setLoginCookie(-3600, 0);
+
+	if (isset($_SESSION['login_' . $cookiename]))
+		unset($_SESSION['login_' . $cookiename]);
+
+	// We need a member!
+	if (!$id_member)
+	{
+		// Redirect back!
+		redirectexit();
+
+		// Probably not needed, but still make sure...
+		fatal_lang_error('no_access', false);
+	}
+
+	// Right, have we got a flood value?
+	if ($password_flood_value !== false)
+		@list ($time_stamp, $number_tries) = explode('|', $password_flood_value);
+
+	// Timestamp invalid or non-existent?
+	if (empty($number_tries) || $time_stamp < (time() - 10))
+	{
+		// If it wasn't *that* long ago, don't give them another five goes.
+		$number_tries = !empty($number_tries) && $time_stamp < (time() - 20) ? 2 : 0;
+		$time_stamp = time();
+	}
+
+	$number_tries++;
+
+	// Broken the law?
+	if ($number_tries > 5)
+		fatal_lang_error('login_threshold_brute_fail', 'critical');
+
+	// Otherwise set the members data. If they correct on their first attempt then we actually clear it, otherwise we set it!
+	updateMemberData($id_member, array('passwd_flood' => $was_correct && $number_tries == 1 ? '' : $time_stamp . '|' . $number_tries));
+
+}]]></search>
+			<add><![CDATA[
+	/**
+	 * Handle LDAP authentication
+	 * 
+	 * @param string $username
+	 * @param string $password
+	 * @return array
+	 */
+	function _authLDAP($username, $password) {
+		// Init return
+		$user = FALSE;
+		
+		$ldap_url = '127.0.0.1';
+		$ldap_domain = 'jtaylor';
+		$ldap_dn = 'dc=jtaylor,dc=local';
+		
+		// Connect
+		if ($ldap = ldap_connect($ldap_url)) {
+			// Set values
+			ldap_set_option($ldap, LDAP_OPT_PROTOCOL_VERSION, 3);
+			ldap_set_option($ldap, LDAP_OPT_REFERRALS, 0);
+			$attributes = array('displayname', 'mail');
+			$filter     = 'sAMAccountName=' . $username;
+			
+			// Bind
+			if ($bind = @ldap_bind($ldap, $ldap_domain . '\\' . $username, $password)) {
+				// Get user info
+				$res = ldap_search($ldap, $ldap_dn, $filter, $attributes);
+				$entries = ldap_get_entries($ldap, $res);
+				if ($entries['count'] == 1) {
+					// Set user
+					$user = array(
+						'username'   => $username,
+						'name'       => $entries[0]['displayname'][0],
+						'email'      => $entries[0]['mail'][0],
+						'company_id' => 1
+					);
+				}
+			}
+			
+			// Close connection
+			ldap_unbind($ldap);
+		}
+		
+		// Return
+		return $user;
+	}]]></add>
+		</operation>
+		<operation>
+			<search position="replace"><![CDATA[	// Load the data up!
+	$request = $smcFunc['db_query']('', '
+		SELECT passwd, id_member, id_group, lngfile, is_activated, email_address, additional_groups, member_name, password_salt,
+			openid_uri, passwd_flood
+		FROM {db_prefix}members
+		WHERE ' . ($smcFunc['db_case_sensitive'] ? 'LOWER(member_name) = LOWER({string:user_name})' : 'member_name = {string:user_name}') . '
+		LIMIT 1',
+		array(
+			'user_name' => $smcFunc['db_case_sensitive'] ? strtolower($_POST['user']) : $_POST['user'],
+		)
+	);]]></search>
+			<add><![CDATA[
+	// Load the data up!
+	if (!$ldap_user['email']) {
+		$request = $smcFunc['db_query']('', '
+			SELECT passwd, id_member, id_group, lngfile, is_activated, email_address, additional_groups, member_name, password_salt,
+				openid_uri, passwd_flood
+			FROM {db_prefix}members
+			WHERE ' . ($smcFunc['db_case_sensitive'] ? 'LOWER(member_name) = LOWER({string:user_name})' : 'member_name = {string:user_name}') . '
+			LIMIT 1',
+			array(
+				'user_name' => $smcFunc['db_case_sensitive'] ? strtolower($_POST['user']) : $_POST['user'],
+			)
+		);
+	} else {
+		$request = $smcFunc['db_query']('', '
+			SELECT passwd, id_member, id_group, lngfile, is_activated, email_address, additional_groups, member_name, password_salt,
+				openid_uri, passwd_flood
+			FROM {db_prefix}members
+			WHERE ' . ($smcFunc['db_case_sensitive'] ? 'LOWER(member_name) = LOWER({string:user_name})' : 'member_name = {string:user_name}') . '
+			LIMIT 1',
+			array(
+				'user_name' => $smcFunc['db_case_sensitive'] ? strtolower($ldap_user['username']) : $ldap_user['username'], 
+			)
+		);
+	}
+	
+
+	if ($smcFunc['db_num_rows']($request) == 0 and $ldap_user['email']) {
+		// User bound to LDAP OK but does not exist in SMF database - create
+		
+		$smcFunc['db_insert']('insert',
+					'{db_prefix}members',
+					array(
+						'member_name'       => 'string',
+						'real_name'         => 'string', 
+						'email_address'     => 'string', 
+						'passwd'            => 'string', 
+						'posts'             => 'int', 
+						'date_registered'   => 'int', 
+						'member_ip'         => 'string', 
+						'is_activated'      => 'int', 
+						'validation_code'   => 'string', 
+						'signature'         => 'string', 
+						'pm_email_notify'   => 'int', 
+						'id_theme'          => 'int', 
+						'id_post_group'     => 'int' 
+					),
+					array(
+						$_REQUEST[user],
+						$ldap_user['name'],
+						$ldap_user['email'],
+						md5_hmac($_REQUEST['passwrd'], $smcFunc['db_case_sensitive'] ? strtolower($_POST['user']) : $_POST['user']),
+						0,
+						time(),
+						$user_info[ip],
+						1,
+						'',
+						addslashes($modSettings['default_personalText']),
+						1,
+						0,
+						44
+					),
+					array('id_member')
+				);
+		
+		updateStats('member');
+
+		// If it's enabled, increase the registrations for today.
+		trackStats(array('registers' => '+'));
+
+		//Retry the query
+		$smcFunc['db_free_result']($request);
+		$request = $smcFunc['db_query']('', '
+			SELECT passwd, id_member, id_group, lngfile, is_activated, email_address, additional_groups, member_name, password_salt,
+				openid_uri, passwd_flood
+			FROM {db_prefix}members
+			WHERE ' . ($smcFunc['db_case_sensitive'] ? 'LOWER(email_address) = LOWER({string:email_address})' : 'email_address = {string:email_address}') . '
+			LIMIT 1',
+			array(
+				'email_address' => $smcFunc['db_case_sensitive'] ? strtolower($ldap_user['email']) : $ldap_user['email'],
+			)
+		);
+		if ($smcFunc['db_num_rows']($request) == 0) { die('here');
+			$context['login_error'] = 'Failed to add LDAP user to the database';
+			return;
+		}
+	}
+	]]></add>
+		</operation>
+</file>
+</modification>
